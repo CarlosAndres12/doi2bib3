@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""Install the doi2bib3 MCP server into opencode.
+
+Creates a Python venv, installs doi2bib3[mcp] into it, and writes/updates the
+opencode MCP config block so the server is available to opencode after restart.
+
+Usage:
+    scripts/install-opencode-mcp                 # workspace opencode.json
+    scripts/install-opencode-mcp --global        # ~/.config/opencode/opencode.jsonc
+    scripts/install-opencode-mcp --venv <path>    # custom venv location
+    scripts/install-opencode-mcp --force          # overwrite existing block
+    scripts/install-opencode-mcp --no-install    # only write config
+    scripts/install-opencode-mcp --no-editable    # normal (non-editable) install
+
+Standard library only — no runtime dependencies.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import venv as venv_module
+from pathlib import Path
+
+
+# --- Constants --------------------------------------------------------------
+
+DEFAULT_VENV = os.path.expanduser("~/.venvs/doi2bib3-mcp")
+MCP_SERVER_NAME = "doi2bib3"
+MCP_MODULE = "doi2bib3.mcp_server"
+TIMEOUT_MS = 10000
+
+WORKSPACE_CONFIG = "opencode.json"
+GLOBAL_CONFIG = os.path.expanduser("~/.config/opencode/opencode.jsonc")
+
+
+# --- Helpers ----------------------------------------------------------------
+
+def repo_root() -> Path:
+    """Return the repository root (parent of this script's scripts/ dir)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def venv_python(venv_path: str) -> str:
+    """Return the absolute path to the venv's python executable."""
+    candidate = Path(venv_path) / "bin" / "python"
+    return str(candidate)
+
+
+def create_venv(venv_path: str) -> None:
+    """Create a venv at venv_path if it does not exist; reuse if it does."""
+    if os.path.exists(venv_path):
+        print(f"Reusing existing venv at {venv_path}")
+        return
+    print(f"Creating venv at {venv_path}")
+    venv_module.create(venv_path, with_pip=True, clear=True)
+
+
+def run_pip_install(venv_path: str, editable: bool) -> int:
+    """Run pip install doi2bib3[mcp] from the repo root into the venv."""
+    py = venv_python(venv_path)
+    root = str(repo_root())
+    spec = f".[mcp]"
+    if editable:
+        spec = "-e " + spec
+    cmd = [py, "-m", "pip", "install", *spec.split(), root]
+    # Remove the trailing separate root arg duplication: pip install -e .[mcp] <root>
+    # Actually pip needs: pip install -e <root>[mcp]  OR  pip install <root>[mcp]
+    # Rebuild cleanly:
+    if editable:
+        cmd = [py, "-m", "pip", "install", "-e", f"{root}[mcp]"]
+    else:
+        cmd = [py, "-m", "pip", "install", f"{root}[mcp]"]
+    print(f"Running: {' '.join(cmd)}")
+    return subprocess.call(cmd)
+
+
+def verify_venv_python(venv_path: str) -> None:
+    """Verify the venv python exists; exit non-zero if not."""
+    py = venv_python(venv_path)
+    if not os.path.isfile(py):
+        sys.stderr.write(f"Error: venv python not found at {py}\n")
+        sys.exit(1)
+
+
+# --- Config block -----------------------------------------------------------
+
+def mcp_block(venv_path: str) -> dict:
+    """Return the opencode MCP config block for doi2bib3."""
+    py = os.path.abspath(venv_python(venv_path))
+    return {
+        "type": "local",
+        "command": [py, "-m", MCP_MODULE],
+        "enabled": True,
+        "timeout": TIMEOUT_MS,
+    }
+
+
+def write_workspace_config(venv_path: str, force: bool) -> None:
+    """Write/update the doi2bib3 block in the workspace opencode.json (plain JSON)."""
+    config_path = WORKSPACE_CONFIG
+    block = mcp_block(venv_path)
+
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    else:
+        config = {}
+
+    mcp = config.setdefault("mcp", {})
+    if MCP_SERVER_NAME in mcp:
+        if not force:
+            sys.stderr.write(
+                f"Error: 'mcp.{MCP_SERVER_NAME}' already exists in {config_path}. "
+                f"Pass --force to overwrite.\n"
+            )
+            sys.exit(1)
+        print(f"Overwriting existing 'mcp.{MCP_SERVER_NAME}' block in {config_path}")
+
+    mcp[MCP_SERVER_NAME] = block
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+    print(f"Wrote 'mcp.{MCP_SERVER_NAME}' block to {config_path}")
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Strip // and /* */ comments from JSONC text for JSON parsing only.
+
+    Used to validate the result; the original text with comments is preserved
+    on disk.
+    """
+    # Remove /* */ block comments.
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    # Remove // line comments (but not inside strings — simple heuristic).
+    lines = text.split("\n")
+    out = []
+    for line in lines:
+        # Naive: find // not inside a string. Good enough for config files.
+        in_string = False
+        i = 0
+        while i < len(line):
+            if line[i] == '"' and (i == 0 or line[i - 1] != "\\"):
+                in_string = not in_string
+            elif line[i] == "/" and not in_string and i + 1 < len(line) and line[i + 1] == "/":
+                line = line[:i]
+                break
+            i += 1
+        out.append(line)
+    return "\n".join(out)
+
+
+def _ensure_trailing_comma(lines: list[str], upto: int) -> None:
+    """Ensure the last non-empty, non-comment line before `upto` ends with a comma."""
+    j = upto - 1
+    while j >= 0:
+        stripped = lines[j].strip()
+        if stripped == "" or stripped.startswith("//") or stripped.startswith("/*"):
+            j -= 1
+            continue
+        # Found the last content line. Add a comma if missing.
+        if not stripped.endswith(",") and not stripped.endswith("{"):
+            lines[j] = lines[j].rstrip() + ","
+        return
+
+
+def write_global_config(venv_path: str, force: bool) -> None:
+    """Write/update the doi2bib3 block in ~/.config/opencode/opencode.jsonc (JSONC).
+
+    Uses a line-preserving edit so existing comments and other config are kept.
+    """
+    config_path = GLOBAL_CONFIG
+    block = mcp_block(venv_path)
+    block_lines = json.dumps(block, indent=4).splitlines()
+
+    # Ensure the config dir and file exist.
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    if not os.path.exists(config_path):
+        # New file: write a minimal JSONC with the block.
+        content = '{\n  "$schema": "https://opencode.ai/config.json",\n  "mcp": {\n'
+        content += f'    "{MCP_SERVER_NAME}": ' + json.dumps(block, indent=4).replace("\n", "\n    ") + "\n"
+        content += "  }\n}\n"
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"Created {config_path} with 'mcp.{MCP_SERVER_NAME}' block")
+        return
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    # Find the doi2bib3 block (line-based scan).
+    doi2bib3_start = None
+    doi2bib3_end = None
+    mcp_line = None
+    for i, line in enumerate(lines):
+        if re.search(r'"mcp"\s*:\s*\{', line):
+            mcp_line = i
+        if re.search(r'"doi2bib3"\s*:', line):
+            doi2bib3_start = i
+            # Find the matching closing brace by counting braces from the
+            # value's opening brace. Use j >= i so single-line blocks
+            # (e.g. "doi2bib3": {...}) match on the same line.
+            depth = 0
+            for j in range(i, len(lines)):
+                depth += lines[j].count("{") - lines[j].count("}")
+                if depth <= 0 and j >= i:
+                    doi2bib3_end = j
+                    break
+            if doi2bib3_end is None:
+                doi2bib3_end = i  # fallback
+            break
+
+    if doi2bib3_start is not None:
+        # --- Replace existing block ---
+        if not force:
+            sys.stderr.write(
+                f"Error: 'mcp.{MCP_SERVER_NAME}' already exists in {config_path}. "
+                f"Pass --force to overwrite.\n"
+            )
+            sys.exit(1)
+        print(f"Overwriting existing 'mcp.{MCP_SERVER_NAME}' block in {config_path}")
+        # Build the replacement lines (indented to match).
+        indent = "    "  # 4 spaces (inside mcp, inside top-level)
+        replacement = [f'{indent}"{MCP_SERVER_NAME}": ' + json.dumps(block, indent=4).replace("\n", "\n" + indent * 2) + "\n"]
+        # Actually, simpler: build with consistent indent.
+        block_json = json.dumps(block, indent=4)
+        replacement = []
+        for k, bl in enumerate(block_json.splitlines()):
+            replacement.append(f"{indent}{bl}\n" if k > 0 else f'{indent}"{MCP_SERVER_NAME}": {bl}\n')
+        # Replace lines[doi2bib3_start..doi2bib3_end] with replacement.
+        lines = lines[:doi2bib3_start] + replacement + lines[doi2bib3_end + 1:]
+    elif mcp_line is not None:
+        # --- Insert into existing mcp object ---
+        # Find the closing brace of the mcp object.
+        depth = 0
+        mcp_close = None
+        for j in range(mcp_line, len(lines)):
+            depth += lines[j].count("{") - lines[j].count("}")
+            if depth <= 0 and j > mcp_line:
+                mcp_close = j
+                break
+        if mcp_close is None:
+            mcp_close = mcp_line + 1
+        # Ensure the line before mcp_close has a trailing comma.
+        _ensure_trailing_comma(lines, mcp_close)
+        indent = "    "
+        block_json = json.dumps(block, indent=4)
+        replacement = []
+        for k, bl in enumerate(block_json.splitlines()):
+            replacement.append(f"{indent}{bl}\n" if k > 0 else f'{indent}"{MCP_SERVER_NAME}": {bl},\n')
+        lines = lines[:mcp_line + 1] + replacement + lines[mcp_line + 1:]
+    else:
+        # --- No mcp object: insert one before the final closing brace ---
+        # Find the last closing brace.
+        last_close = None
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].strip().startswith("}"):
+                last_close = i
+                break
+        if last_close is None:
+            sys.stderr.write(f"Error: could not find closing brace in {config_path}\n")
+            sys.exit(1)
+        # Ensure the line before has a trailing comma.
+        _ensure_trailing_comma(lines, last_close)
+        block_json = json.dumps(block, indent=4)
+        mcp_block_lines = ['  "mcp": {\n']
+        for k, bl in enumerate(block_json.splitlines()):
+            mcp_block_lines.append(f"    {bl}\n" if k > 0 else f'    "{MCP_SERVER_NAME}": {bl}\n')
+        mcp_block_lines.append("  }\n")
+        lines = lines[:last_close] + mcp_block_lines + lines[last_close:]
+
+    content = "".join(lines)
+
+    # Validate the result parses as JSON (after stripping comments).
+    try:
+        json.loads(_strip_jsonc_comments(content))
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"Error: edited config is invalid JSON: {exc}\n")
+        sys.exit(1)
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"Wrote 'mcp.{MCP_SERVER_NAME}' block to {config_path}")
+
+
+def write_config(venv_path: str, force: bool, global_config: bool) -> None:
+    """Dispatch to workspace or global config writer."""
+    if global_config:
+        write_global_config(venv_path, force)
+    else:
+        write_workspace_config(venv_path, force)
+
+
+# --- Main -------------------------------------------------------------------
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Install the doi2bib3 MCP server into opencode."
+    )
+    parser.add_argument(
+        "--global",
+        dest="global_config",
+        action="store_true",
+        help=f"Write to {GLOBAL_CONFIG} instead of the workspace {WORKSPACE_CONFIG}.",
+    )
+    parser.add_argument(
+        "--venv",
+        default=DEFAULT_VENV,
+        help=f"Override the venv location (default: {DEFAULT_VENV}).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing doi2bib3 MCP block in the config.",
+    )
+    parser.add_argument(
+        "--no-install",
+        action="store_true",
+        help="Skip venv creation and pip install; only write the config.",
+    )
+    parser.add_argument(
+        "--no-editable",
+        action="store_true",
+        help="Install non-editable (normal pip install instead of -e).",
+    )
+    args = parser.parse_args(argv)
+
+    venv_path = os.path.abspath(os.path.expanduser(args.venv))
+
+    # --- venv + pip install ---
+    if not args.no_install:
+        create_venv(venv_path)
+        verify_venv_python(venv_path)
+        rc = run_pip_install(venv_path, editable=not args.no_editable)
+        if rc != 0:
+            sys.stderr.write(
+                f"Error: pip install failed (exit code {rc}). "
+                f"Config not written.\n"
+            )
+            return rc
+    else:
+        verify_venv_python(venv_path)
+
+    # --- config write ---
+    write_config(venv_path, force=args.force, global_config=args.global_config)
+
+    print()
+    print("Done. Restart opencode to load the doi2bib3 MCP server.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

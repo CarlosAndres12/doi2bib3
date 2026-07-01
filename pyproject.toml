@@ -44,7 +44,13 @@ dev = [
     "pytest>=9.0.1",
     "tox>=4.32.0",
 ]
+mcp = [
+    "mcp>=1.0",
+]
 
+
+[project.scripts]
+doi2bib3-mcp = "doi2bib3.mcp_server.__main__:main"
 
 [project.urls]
 "Homepage" = "https://github.com/archisman-panigrahi/doi2bib3"

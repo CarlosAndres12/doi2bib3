@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""MCP server launcher script for doi2bib3.
+
+When executed directly from the repository tree (e.g.
+``python3 scripts/doi2bib3-mcp``), prefer the repository copy of the package
+over any system-installed one by inserting the repository root into
+``sys.path`` before importing.
+"""
+import os
+import sys
+
+# Ensure local repo package is preferred when running the script from the
+# repository root (so testing modified code is straightforward).
+try:
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+except Exception:
+    pass
+
+from doi2bib3.mcp_server.__main__ import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

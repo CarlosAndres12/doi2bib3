@@ -4,15 +4,27 @@
 When executed directly from the repository tree (e.g. ``python3 scripts/doi2bib3``),
 prefer the repository copy of the package over any system-installed one by
 inserting the repository root into ``sys.path`` before importing.
+
+Supports both single-identifier fetch and MCP subcommands:
+
+    # Fetch (default, no [mcp] extra needed)
+    doi2bib3 10.1038/nphys1170 [-o OUT] [--bibitem]
+
+    # MCP subcommands (require [mcp] extra)
+    doi2bib3 audit <path>
+    doi2bib3 repair <path> [--normalize] [--force] [--flat]
+    doi2bib3 resolve <identifier>
+    doi2bib3 normalize <bibtex>
+    doi2bib3 cache-stats
 """
 import argparse
+import json
 import os
 import sys
 
 # Ensure local repo package is preferred when running the script from the
 # repository root (so testing modified code is straightforward).
 try:
-    # scripts/ is inside the repo; repo root is parent directory
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
@@ -23,8 +35,117 @@ from doi2bib3 import fetch_bibtex, format_bibtex_to_aps_bibitem
 from doi2bib3.io import save_bibtex_to_file
 
 
-def build_parser():
-    """Build the command-line parser."""
+# --- Lazy import helpers ----------------------------------------------------
+
+def _mcp_error():
+    sys.stderr.write(
+        "This command requires the 'mcp' extra. Install it with:\n"
+        "    pip install doi2bib3[mcp]\n"
+    )
+    return 1
+
+
+# --- Subcommand handlers ----------------------------------------------------
+
+def _cmd_audit(args):
+    """doi2bib3 audit <path>"""
+    try:
+        from doi2bib3.mcp_server.tools import audit_bib_file
+    except ImportError:
+        return _mcp_error()
+    r = audit_bib_file(args.path)
+    if not r.ok:
+        print("Error:", r.error, file=sys.stderr)
+        return 1
+    summary = r.data["summary"]
+    print(f"Entries: {summary['entries']}")
+    print(f"With issues: {summary['with_issues']}")
+    print(f"Missing DOI: {summary['missing_doi']}")
+    print()
+    for e in r.data["entries"]:
+        if e["issues"]:
+            print(f"[{e['key']}] type={e['type']} doi={e['doi']}")
+            for i in e["issues"]:
+                print(f"    {i['field']}: {i['severity']}", end="")
+                if i.get("expected"):
+                    print(f" (expected: {i['expected'][:60]})", end="")
+                if i.get("actual"):
+                    print(f" (actual: {i['actual'][:60]})", end="")
+                print()
+    return 0
+
+
+def _cmd_repair(args):
+    """doi2bib3 repair <path> [--normalize] [--force] [--flat]"""
+    try:
+        from doi2bib3.mcp_server.repair import repair_bib_file_inplace
+    except ImportError:
+        return _mcp_error()
+    r = repair_bib_file_inplace(
+        args.path,
+        auto_normalize=args.normalize,
+        overwrite_backup=args.force,
+        group_output=not args.flat,
+    )
+    if not r.ok:
+        print("Error:", r.error, file=sys.stderr)
+        return 1
+    s = r.data["summary"]
+    print(f"Entries: {s['entries']}  Repaired: {s['repaired']}  "
+          f"Skipped: {s['skipped']}  Failed: {s['failed']}")
+    print(f"Backup: {r.data['backup']}")
+    return 0
+
+
+def _cmd_resolve(args):
+    """doi2bib3 resolve <identifier>"""
+    try:
+        from doi2bib3.mcp_server.tools import resolve_reference
+    except ImportError:
+        return _mcp_error()
+    r = resolve_reference(doi=args.identifier)
+    if not r.ok:
+        # Try title query if DOI-like input failed
+        r2 = resolve_reference(query=args.identifier)
+        if r2.ok:
+            print(r2.data)
+            return 0
+        print("Error:", r.error or r2.error, file=sys.stderr)
+        return 1
+    print(r.data)
+    return 0
+
+
+def _cmd_normalize(args):
+    """doi2bib3 normalize <bibtex>"""
+    try:
+        from doi2bib3.mcp_server.tools import normalize_bibtex_entry
+    except ImportError:
+        return _mcp_error()
+    r = normalize_bibtex_entry(args.bibtex)
+    if not r.ok:
+        print("Error:", r.error, file=sys.stderr)
+        return 1
+    print(r.data)
+    return 0
+
+
+def _cmd_cache_stats(args):
+    """doi2bib3 cache-stats"""
+    try:
+        from doi2bib3.mcp_server import cache
+    except ImportError:
+        return _mcp_error()
+    cache.configure()
+    s = cache.stats()
+    print(json.dumps(s, indent=2))
+    return 0
+
+
+# --- Parser -----------------------------------------------------------------
+
+def _fetch_parser():
+    """Parser for the default fetch mode (no subcommand)."""
     p = argparse.ArgumentParser(
         description="Fetch BibTeX by DOI, DOI URL, arXiv id or arXiv URL"
     )
@@ -43,9 +164,61 @@ def build_parser():
     return p
 
 
+def build_parser():
+    """Build the command-line parser with subcommands."""
+    p = argparse.ArgumentParser(
+        description="doi2bib3 — fetch, audit, repair, and normalize BibTeX"
+    )
+    subs = p.add_subparsers(dest="command", title="subcommands")
+
+    # audit
+    pa = subs.add_parser("audit", help="Audit a .bib file for missing/mismatched fields")
+    pa.add_argument("path", help="Relative or absolute path to a .bib file")
+    pa.set_defaults(func=_cmd_audit)
+
+    # repair
+    pr = subs.add_parser("repair", help="Repair a .bib file in place with backup")
+    pr.add_argument("path", help="Relative or absolute path to a .bib file")
+    pr.add_argument("--normalize", action="store_true",
+                    help="Apply doi2bib3.normalize (casing, publisher replacements)")
+    pr.add_argument("--force", action="store_true",
+                    help="Overwrite an existing .bak backup")
+    pr.add_argument("--flat", action="store_true",
+                    help="Disable section grouping in output (flat format)")
+    pr.set_defaults(func=_cmd_repair)
+
+    # resolve
+    pv = subs.add_parser("resolve", help="Resolve a DOI or title to canonical BibTeX")
+    pv.add_argument("identifier", help="DOI, arXiv ID, URL, or title to resolve")
+    pv.set_defaults(func=_cmd_resolve)
+
+    # normalize
+    pn = subs.add_parser("normalize", help="Normalize a single BibTeX entry string")
+    pn.add_argument("bibtex", help="A BibTeX entry string to normalize")
+    pn.set_defaults(func=_cmd_normalize)
+
+    # cache-stats
+    pc = subs.add_parser("cache-stats", help="Print reference cache statistics")
+    pc.set_defaults(func=_cmd_cache_stats)
+
+    return p
+
+
 def main(argv=None):
-    """Run CLI: resolve identifier, fetch normalized BibTeX, output or save."""
-    parser = build_parser()
+    """Run CLI."""
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # If the first argument is a recognized subcommand, dispatch to that
+    # command's parser. Otherwise, use the default fetch parser.
+    subcommands = {"audit", "repair", "resolve", "normalize", "cache-stats"}
+    if argv and argv[0] in subcommands:
+        parser = build_parser()
+        args = parser.parse_args(argv)
+        return args.func(args)
+
+    # Default fetch mode (preserved backward compatible path).
+    parser = _fetch_parser()
     args = parser.parse_args(argv)
     if not args.identifier:
         parser.print_help()
@@ -72,5 +245,5 @@ def main(argv=None):
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))

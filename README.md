@@ -1,4 +1,5 @@
 # doi2bib3
+THIS IF A FORK OF https://github.com/archisman-panigrahi/doi2bib3
 
 doi2bib3 is a small Python utility to fetch BibTeX metadata for a DOI or to
 resolve arXiv identifiers to DOIs and fetch their BibTeX entries. It accepts
@@ -16,44 +17,20 @@ This tool combines the features of [doi2bib](https://github.com/bibcure/doi2bib/
 - Full pipeline documentation (input -> output): [`docs/ALGORITHM.md`](docs/ALGORITHM.md)
 - Diagram version of the pipeline: [`docs/ALGORITHM_VISUALS.md`](docs/ALGORITHM_VISUALS.md)
 
-A cross-platform **GUI frontend** is available: Check out [QuickBib](https://archisman-panigrahi.github.io/QuickBib) and its [webapp](https://quickbib.streamlit.app/).
+
 
 ## Installation
 
-[![Packaging status](https://repology.org/badge/vertical-allrepos/python:doi2bib3.svg?columns=3)](https://repology.org/project/python:doi2bib3/versions)
-
-[![PyPI - Version](https://img.shields.io/pypi/v/doi2bib3?color=67bed9)](https://pypi.org/project/doi2bib3/)
-
-### Install from pypi
-
-```shell
-pip install --user doi2bib3
-```
-
-### Arch Linux
-
-In Arch Linux you can install it from the [AUR](https://aur.archlinux.org/packages/python-doi2bib3) with the command `yay -S python-doi2bib3`.
-
-### Ubuntu
-
-You can use our [official PPA](https://code.launchpad.net/~apandada1/+archive/ubuntu/quickbib)
-
 ```bash
-sudo add-apt-repository ppa:apandada1/quickbib
-sudo apt update
-sudo apt install python3-doi2bib3
+pipx install -e .
 ```
-
-### Debian
-
-You can grab the prebuild .deb package from [GitHub releases](https://github.com/archisman-panigrahi/doi2bib3/releases/latest).
 
 ### Installing from source
 
 Create a virtual environment and install runtime dependencies:
 
 ```bash
-git clone https://github.com/archisman-panigrahi/doi2bib3.git
+git clone https://github.com/CarlosAndres12/doi2bib3
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -64,6 +41,36 @@ Install the package for local development:
 ```bash
 pip install -e .
 ```
+
+### MCP server (for AI coding assistants)
+
+`doi2bib3` ships an optional MCP server (five tools: `audit_bib_file`,
+`resolve_reference`, `normalize_bibtex_entry`, `repair_bib_file_inplace`,
+`cache_stats`) that lets AI coding assistants (opencode, Claude Code, Cursor,
+Windsurf) audit, resolve, normalize, repair, and inspect BibTeX files. To install
+and register it with **opencode** in one step:
+
+```bash
+pip install -e ".[mcp]"
+scripts/install-opencode-mcp
+```
+
+Once installed, you can also process a `.bib` file end-to-end from the command line
+(no MCP client needed):
+
+```bash
+# Audit a .bib file (report issues, no changes)
+doi2bib3 audit references.bib
+
+# Repair in place: resolve every DOI, normalize fields, backup before writing
+doi2bib3 repair references.bib --normalize
+```
+
+The repair command creates a backup at `references.bib.bak` before touching the
+original, groups output into VERIFIED / NOT FOUND / NO IDENTIFIER sections, and
+annotates each entry with `% STATUS:` comment lines.
+
+See [`docs/MCP_SERVER.md`](docs/MCP_SERVER.md) for full details.
 
 ## CLI usage
 
@@ -79,6 +86,91 @@ python scripts/doi2bib3 <identifier> [-o OUT] [--bibitem]
 
 # or when installed as console script
 doi2bib3 <identifier> [-o OUT] [--bibitem]
+```
+
+The CLI also supports subcommands for bibliography management (requires the
+`[mcp]` extra: `pip install "doi2bib3[mcp]"`).
+
+### `doi2bib3 audit <path>`
+
+Audit a `.bib` file for missing, mismatched, or malformed fields without
+modifying it. Prints a summary and per-entry issues.
+
+```bash
+doi2bib3 audit references.bib
+```
+```
+Entries: 99
+With issues: 42
+Missing DOI: 5
+
+[einstein1905] type=article doi=10.1002/andp.19053221004
+    title: mismatch (expected: "On the Electrodynamics of Moving..."...)
+    year: mismatch (expected: "1905" actual: "1906")
+```
+
+### `doi2bib3 repair <path>`
+
+Repair a `.bib` file in place: resolves canonical metadata for every entry with
+a DOI or title, optionally normalizes fields, and rewrites the file atomically.
+Always creates a `.bak` backup first and retains it as a fallback.
+
+| Flag            | Description                                        |
+|-----------------|----------------------------------------------------|
+| `--normalize`   | Apply doi2bib3.normalize (casing, journal abbrevs) |
+| `--force`       | Overwrite an existing `.bak` backup                |
+| `--flat`        | Disable section grouping (flat output)             |
+
+```bash
+# Basic repair (no normalization, grouped output with % STATUS comments)
+doi2bib3 repair references.bib
+
+# Repair with normalization and force overwrite existing backup
+doi2bib3 repair references.bib --normalize --force
+```
+```
+Entries: 99  Repaired: 80  Skipped: 15  Failed: 4
+Backup: references.bib.bak
+```
+
+### `doi2bib3 resolve <identifier>`
+
+Resolve a DOI, arXiv ID, URL, or title to a canonical BibTeX string.
+
+```bash
+doi2bib3 resolve 10.1103/PhysRevB.99.014101
+doi2bib3 resolve "on the electrodynamics of moving bodies"
+```
+
+### `doi2bib3 normalize <bibtex>`
+
+Normalize a single BibTeX entry (fixes casing, abbreviates journal names).
+
+```bash
+doi2bib3 normalize "@article{x, title={Hello}, journal={Physical Review B}, year={2020}}"
+```
+```
+@article{hello_2020,
+ journal = {Phys. Rev. B},
+ title = {{Hello}},
+ year = {2020}
+}
+```
+
+### `doi2bib3 cache-stats`
+
+Print reference cache statistics (entries, hit rate, database location).
+
+```bash
+doi2bib3 cache-stats
+```
+```json
+{
+  "entries": 80,
+  "hit_rate": 0.85,
+  "db_path": "/home/user/.cache/doi2bib3/references.db",
+  "db_size_bytes": 45056
+}
 ```
 
 ## Examples
