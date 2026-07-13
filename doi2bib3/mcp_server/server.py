@@ -182,7 +182,11 @@ def _tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
-def _dispatch(name: str, arguments: dict[str, Any] | None) -> ToolResult:
+def _dispatch(
+    name: str,
+    arguments: dict[str, Any] | None,
+    progress_callback: tools.ProgressCallback | None = None,
+) -> ToolResult:
     """Route a tool call to the appropriate handler in :mod:`tools`."""
     arguments = arguments or {}
     refresh_cache = bool(arguments.get("refresh_cache", False))
@@ -190,7 +194,12 @@ def _dispatch(name: str, arguments: dict[str, Any] | None) -> ToolResult:
     if name == "audit_bib_file":
         path = arguments.get("path")
         timeout = int(arguments.get("timeout") or tools.DEFAULT_TIMEOUT)
-        return tools.audit_bib_file(path=path, timeout=timeout, refresh_cache=refresh_cache)
+        return tools.audit_bib_file(
+            path=path,
+            timeout=timeout,
+            refresh_cache=refresh_cache,
+            progress_callback=progress_callback,
+        )
 
     if name == "resolve_reference":
         doi = arguments.get("doi")
@@ -220,6 +229,7 @@ def _dispatch(name: str, arguments: dict[str, Any] | None) -> ToolResult:
             timeout=timeout,
             refresh_cache=refresh_cache,
             group_output=group_output,
+            progress_callback=progress_callback,
         )
 
     if name == "cache_stats":
@@ -269,7 +279,40 @@ def build_server():
     async def handle_call_tool(
         name: str, arguments: dict[str, Any] | None
     ) -> list[types.TextContent]:
-        result = _dispatch(name, arguments)
+        # Build a progress callback if the client provided a progressToken via
+        # the MCP request metadata.  Notifications are scheduled via
+        # asyncio.create_task and will be flushed once the event loop regains
+        # control (i.e. after the synchronous _dispatch returns).
+        progress_callback = None
+        try:
+            from mcp.server.lowlevel.server import request_ctx
+            import asyncio as _asyncio_impl
+            ctx = request_ctx.get()
+            meta = getattr(ctx, "meta", None) or {}
+            progress_token = meta.get("progressToken") if isinstance(meta, dict) else None
+            if progress_token is not None:
+                session = ctx.session
+                loop = _asyncio_impl.get_running_loop()
+
+                def _send_progress(payload: dict[str, Any]) -> None:
+                    try:
+                        progress = (payload["index"] + 1) / payload["total"]
+                        _asyncio_impl.create_task(
+                            session.send_progress_notification(
+                                progress_token=progress_token,
+                                progress=progress,
+                                total=float(payload["total"]),
+                                message=payload.get("message"),
+                            ),
+                        )
+                    except Exception:
+                        pass  # never let a progress notification abort the tool
+
+                progress_callback = _send_progress
+        except Exception:
+            pass  # no _meta or request_ctx unavailable — no progress
+
+        result = _dispatch(name, arguments, progress_callback=progress_callback)
         text, _is_error = _result_to_payload(result)
         # Errors are returned as content with isError via CallToolResult for
         # full control, so the client sees a structured error rather than a

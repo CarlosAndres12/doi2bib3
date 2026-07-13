@@ -12,7 +12,7 @@ Set ``refresh_cache=True`` to force a fresh network fetch.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from typing import Optional, Any
+from typing import Callable, Optional, Any
 
 from ..backend import fetch_bibtex, DOIError
 from ..normalize import normalize_bibtex
@@ -110,6 +110,40 @@ class ToolResult:
 
 # Default per-request timeout (seconds) for network lookups.
 DEFAULT_TIMEOUT = 30
+
+# --- Progress notification types ----------------------------------------------
+
+ProgressCallback = Callable[[dict[str, Any]], None]
+"""Signature for progress callbacks used by audit_bib_file and repair_bib_file_inplace.
+
+Receives a dict with keys: ``index`` (int, 0-based current entry), ``total`` (int,
+total entries), ``key`` (str, BibTeX entry key), ``doi`` (str|None), ``outcome`` (str,
+e.g. "resolved" / "skipped" / "failed"), ``message`` (str, human-readable status).
+"""
+
+
+def build_progress_payload(
+    index: int,
+    total: int,
+    key: str,
+    doi: str | None,
+    outcome: str,
+    message: str,
+) -> dict[str, Any]:
+    """Build a progress notification payload dict for a single entry.
+
+    The caller converts this into an MCP ``notifications/progress`` message
+    where ``progress = (index + 1) / total`` and ``total`` is set as the
+    optional total field.
+    """
+    return {
+        "index": index,
+        "total": total,
+        "key": key,
+        "doi": doi,
+        "outcome": outcome,
+        "message": message,
+    }
 
 
 def _doi_from_bibtex(bibtex: str) -> Optional[str]:

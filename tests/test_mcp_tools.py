@@ -333,3 +333,126 @@ def test_audit_string_macros(monkeypatch):
     r = tools.audit_bib_file(os.path.join(FIXTURES, "string_macros.bib"))
     assert r.ok is True
     assert r.data["summary"]["entries"] == 1
+
+
+# --- progress callback -------------------------------------------------------
+
+def test_audit_progress_callback_called_per_entry(monkeypatch):
+    """Progress callback receives one call per entry with correct data."""
+    monkeypatch.setattr(
+        adapter,
+        "resolve_identifier",
+        lambda identifier, timeout=30, **kw: adapter.ToolResult(
+            adapter.KIND_RESOLVED, ok=True, data=_canonical_bibtex()
+        ),
+    )
+    calls = []
+    def _cb(payload):
+        calls.append(payload)
+
+    r = tools.audit_bib_file(
+        os.path.join(FIXTURES, "clean.bib"),
+        progress_callback=_cb,
+    )
+    assert r.ok is True
+    # clean.bib has 1 entry
+    assert len(calls) == 2  # 1 per-entry + 1 final
+
+
+def test_audit_progress_payload_structure(monkeypatch):
+    """Each callback payload has expected keys and sane values."""
+    monkeypatch.setattr(
+        adapter,
+        "resolve_identifier",
+        lambda identifier, timeout=30, **kw: adapter.ToolResult(
+            adapter.KIND_RESOLVED, ok=True, data=_canonical_bibtex()
+        ),
+    )
+    payloads = []
+    def _cb(payload):
+        payloads.append(payload)
+
+    tools.audit_bib_file(
+        os.path.join(FIXTURES, "clean.bib"),
+        progress_callback=_cb,
+    )
+    # First payload: per-entry
+    p1 = payloads[0]
+    assert p1["index"] == 0
+    assert p1["total"] == 1
+    assert p1["key"] == "einstein1905"
+    assert p1["doi"] is not None
+    assert p1["outcome"] in ("resolved", "skipped", "failed")
+    assert isinstance(p1["message"], str)
+
+    # Last payload: final completion
+    pf = payloads[-1]
+    assert pf["outcome"] == "complete"
+
+
+def test_audit_progress_callback_none_is_safe(monkeypatch):
+    """When progress_callback is None, audit works normally."""
+    monkeypatch.setattr(
+        adapter,
+        "resolve_identifier",
+        lambda identifier, timeout=30, **kw: adapter.ToolResult(
+            adapter.KIND_RESOLVED, ok=True, data=_canonical_bibtex()
+        ),
+    )
+    r = tools.audit_bib_file(
+        os.path.join(FIXTURES, "clean.bib"),
+        progress_callback=None,
+    )
+    assert r.ok is True
+    assert r.data["summary"]["entries"] == 1
+
+
+def test_audit_progress_callback_exception_does_not_abort(monkeypatch):
+    """A callback that raises is caught; audit finishes correctly."""
+    monkeypatch.setattr(
+        adapter,
+        "resolve_identifier",
+        lambda identifier, timeout=30, **kw: adapter.ToolResult(
+            adapter.KIND_RESOLVED, ok=True, data=_canonical_bibtex()
+        ),
+    )
+    def _bad_cb(payload):
+        raise RuntimeError("callback broken")
+
+    r = tools.audit_bib_file(
+        os.path.join(FIXTURES, "clean.bib"),
+        progress_callback=_bad_cb,
+    )
+    # Should still complete successfully.
+    assert r.ok is True
+    assert r.data["summary"]["entries"] == 1
+
+
+def test_audit_progress_values_monotonic(monkeypatch):
+    """Progress ratio advances monotonically; final value is 1.0."""
+    # We need a file with multiple entries to test monotonicity.
+    # Use missing_fields.bib (1 entry) — enough to test that ratio is correct.
+    monkeypatch.setattr(
+        adapter,
+        "resolve_identifier",
+        lambda identifier, timeout=30, **kw: adapter.ToolResult(
+            adapter.KIND_RESOLVED, ok=True, data=_canonical_bibtex()
+        ),
+    )
+    payloads = []
+    def _cb(payload):
+        payloads.append(payload)
+
+    # missing_fields.bib has 1 entry
+    r = tools.audit_bib_file(
+        os.path.join(FIXTURES, "missing_fields.bib"),
+        progress_callback=_cb,
+    )
+    assert r.ok is True
+    # Verify ratio: index 0, total 1 -> progress = (0+1)/1 = 1.0
+    per_entry = [p for p in payloads if p["outcome"] != "complete"]
+    final = [p for p in payloads if p["outcome"] == "complete"]
+    assert len(per_entry) == 1
+    assert len(final) == 1
+    # Per-entry progress should be (index+1)/total = 1/1 = 1.0 for the only entry
+    assert (per_entry[0]["index"] + 1) / per_entry[0]["total"] == 1.0

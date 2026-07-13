@@ -402,3 +402,220 @@ def test_rerepair_on_grouped_file_is_idempotent(tmp_path, monkeypatch):
     # Re-running should produce same counts.
     outcomes2 = repair.repair_bib_file_inplace(path=path, group_output=True, overwrite_backup=True).data["summary"]
     assert outcomes1 == outcomes2
+
+
+# --- progress callback -------------------------------------------------------
+
+def test_repair_progress_callback_called_per_entry(monkeypatch, tmp_path):
+    """Progress callback receives one call per entry with correct data."""
+    from doi2bib3.mcp_server import adapter as _adapter
+
+    monkeypatch.setattr(
+        _adapter,
+        "resolve_identifier",
+        lambda identifier, timeout=30, **kw: _adapter.ToolResult(
+            _adapter.KIND_RESOLVED, ok=True,
+            data=(
+                "@article{test2020,\n"
+                " author = {Test, Author},\n"
+                " title = {Test Title},\n"
+                " journal = {Test Journal},\n"
+                " year = {2020},\n"
+                " doi = {10.1000/test},\n"
+                "}"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        _adapter,
+        "normalize_entry",
+        lambda bib_str, refresh_cache=False: _adapter.ToolResult(
+            _adapter.KIND_RESOLVED, ok=True, data=bib_str
+        ),
+    )
+
+    # Create a temp .bib file with one entry
+    bib_path = tmp_path / "test.bib"
+    bib_path.write_text(
+        "@article{test2020,\n"
+        " author = {Old, Name},\n"
+        " title = {Old Title},\n"
+        " doi = {10.1000/test},\n"
+        "}"
+    )
+
+    calls = []
+    def _cb(payload):
+        calls.append(payload)
+
+    r = repair.repair_bib_file_inplace(
+        str(bib_path),
+        progress_callback=_cb,
+    )
+    assert r.ok is True
+    # 1 entry -> 1 per-entry + 1 final
+    assert len(calls) == 2
+
+
+def test_repair_progress_payload_structure(monkeypatch, tmp_path):
+    """Each callback payload has expected keys and sane values."""
+    from doi2bib3.mcp_server import adapter as _adapter
+
+    monkeypatch.setattr(
+        _adapter,
+        "resolve_identifier",
+        lambda identifier, timeout=30, **kw: _adapter.ToolResult(
+            _adapter.KIND_RESOLVED, ok=True,
+            data=(
+                "@article{test2020,\n"
+                " author = {Test, Author},\n"
+                " title = {Test Title},\n"
+                " journal = {Test Journal},\n"
+                " year = {2020},\n"
+                " doi = {10.1000/test},\n"
+                "}"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        _adapter,
+        "normalize_entry",
+        lambda bib_str, refresh_cache=False: _adapter.ToolResult(
+            _adapter.KIND_RESOLVED, ok=True, data=bib_str
+        ),
+    )
+
+    bib_path = tmp_path / "test.bib"
+    bib_path.write_text(
+        "@article{test2020,\n"
+        " author = {Old},\n"
+        " title = {Old},\n"
+        " doi = {10.1000/test},\n"
+        "}"
+    )
+
+    payloads = []
+    def _cb(payload):
+        payloads.append(payload)
+
+    repair.repair_bib_file_inplace(str(bib_path), progress_callback=_cb)
+    p1 = payloads[0]
+    assert p1["index"] == 0
+    assert p1["total"] == 1
+    assert p1["key"] == "test2020"
+    assert p1["doi"] == "10.1000/test"
+    assert p1["outcome"] in ("repaired", "skipped", "failed")
+    assert isinstance(p1["message"], str)
+
+    pf = payloads[-1]
+    assert pf["outcome"] == "complete"
+
+
+def test_repair_progress_callback_none_is_safe(monkeypatch, tmp_path):
+    """When progress_callback is None, repair works normally."""
+    from doi2bib3.mcp_server import adapter as _adapter
+
+    monkeypatch.setattr(
+        _adapter,
+        "resolve_identifier",
+        lambda identifier, timeout=30, **kw: _adapter.ToolResult(
+            _adapter.KIND_RESOLVED, ok=True,
+            data=(
+                "@article{test2020,\n"
+                " author = {Test},\n"
+                " title = {Test},\n"
+                " journal = {Test},\n"
+                " year = {2020},\n"
+                " doi = {10.1000/test},\n"
+                "}"
+            ),
+        ),
+    )
+
+    bib_path = tmp_path / "test.bib"
+    bib_path.write_text(
+        "@article{test2020,\n"
+        " doi = {10.1000/test},\n"
+        "}"
+    )
+
+    r = repair.repair_bib_file_inplace(str(bib_path), progress_callback=None)
+    assert r.ok is True
+    assert r.data["summary"]["entries"] == 1
+
+
+def test_repair_progress_callback_exception_does_not_abort(monkeypatch, tmp_path):
+    """A callback that raises is caught; repair finishes correctly."""
+    from doi2bib3.mcp_server import adapter as _adapter
+
+    monkeypatch.setattr(
+        _adapter,
+        "resolve_identifier",
+        lambda identifier, timeout=30, **kw: _adapter.ToolResult(
+            _adapter.KIND_RESOLVED, ok=True,
+            data=(
+                "@article{test2020,\n"
+                " author = {Test},\n"
+                " title = {Test},\n"
+                " journal = {Test},\n"
+                " year = {2020},\n"
+                " doi = {10.1000/test},\n"
+                "}"
+            ),
+        ),
+    )
+
+    bib_path = tmp_path / "test.bib"
+    bib_path.write_text(
+        "@article{test2020,\n"
+        " doi = {10.1000/test},\n"
+        "}"
+    )
+
+    def _bad_cb(payload):
+        raise RuntimeError("callback broken")
+
+    r = repair.repair_bib_file_inplace(str(bib_path), progress_callback=_bad_cb)
+    assert r.ok is True
+    assert r.data["summary"]["entries"] == 1
+
+
+def test_repair_progress_values_monotonic(monkeypatch, tmp_path):
+    """Progress values advance monotonically."""
+    from doi2bib3.mcp_server import adapter as _adapter
+
+    monkeypatch.setattr(
+        _adapter,
+        "resolve_identifier",
+        lambda identifier, timeout=30, **kw: _adapter.ToolResult(
+            _adapter.KIND_RESOLVED, ok=True,
+            data=(
+                "@article{test2020,\n"
+                " author = {Test},\n"
+                " title = {Test},\n"
+                " journal = {Test},\n"
+                " year = {2020},\n"
+                " doi = {10.1000/test},\n"
+                "}"
+            ),
+        ),
+    )
+
+    bib_path = tmp_path / "test.bib"
+    bib_path.write_text(
+        "@article{test2020,\n"
+        " doi = {10.1000/test},\n"
+        "}"
+    )
+
+    payloads = []
+    def _cb(payload):
+        payloads.append(payload)
+
+    r = repair.repair_bib_file_inplace(str(bib_path), progress_callback=_cb)
+    assert r.ok is True
+    per_entry = [p for p in payloads if p["outcome"] != "complete"]
+    final = [p for p in payloads if p["outcome"] == "complete"]
+    assert len(per_entry) == 1
+    assert len(final) == 1
+    assert (per_entry[0]["index"] + 1) / per_entry[0]["total"] == 1.0

@@ -1,5 +1,5 @@
 # doi2bib3
-THIS IF A FORK OF https://github.com/archisman-panigrahi/doi2bib3
+This is a fork of [archisman-panigrahi/doi2bib3](https://github.com/archisman-panigrahi/doi2bib3) maintained at [CarlosAndres12/doi2bib3](https://github.com/CarlosAndres12/doi2bib3).
 
 doi2bib3 is a small Python utility to fetch BibTeX metadata for a DOI or to
 resolve arXiv identifiers to DOIs and fetch their BibTeX entries. It accepts
@@ -47,8 +47,13 @@ pip install -e .
 `doi2bib3` ships an optional MCP server (five tools: `audit_bib_file`,
 `resolve_reference`, `normalize_bibtex_entry`, `repair_bib_file_inplace`,
 `cache_stats`) that lets AI coding assistants (opencode, Claude Code, Cursor,
-Windsurf) audit, resolve, normalize, repair, and inspect BibTeX files. To install
-and register it with **opencode** in one step:
+Windsurf) audit, resolve, normalize, repair, and inspect BibTeX files. The server
+supports progress notifications — when the client provides a `progressToken`,
+the server streams per-entry progress during `audit_bib_file` and
+`repair_bib_file_inplace` so long-running operations don't leave the caller
+waiting blindly.
+
+To install and register it with **opencode** in one step:
 
 ```bash
 pip install -e ".[mcp]"
@@ -63,6 +68,7 @@ Once installed, you can also process a `.bib` file end-to-end from the command l
 doi2bib3 audit references.bib
 
 # Repair in place: resolve every DOI, normalize fields, backup before writing
+# Use --force or --overwrite_backup to overwrite an existing .bak
 doi2bib3 repair references.bib --normalize
 ```
 
@@ -113,20 +119,26 @@ Missing DOI: 5
 
 Repair a `.bib` file in place: resolves canonical metadata for every entry with
 a DOI or title, optionally normalizes fields, and rewrites the file atomically.
-Always creates a `.bak` backup first and retains it as a fallback.
+Always creates a `.bak` backup first and retains it as a fallback. By default,
+an existing `.bak` blocks the repair — use `--force` or `--overwrite_backup`
+to proceed.
 
-| Flag            | Description                                        |
-|-----------------|----------------------------------------------------|
-| `--normalize`   | Apply doi2bib3.normalize (casing, journal abbrevs) |
-| `--force`       | Overwrite an existing `.bak` backup                |
-| `--flat`        | Disable section grouping (flat output)             |
+| Flag              | Description                                        |
+|-------------------|----------------------------------------------------|
+| `--normalize`     | Apply doi2bib3.normalize (casing, journal abbrevs) |
+| `--force`         | Overwrite an existing `.bak` backup (CLI alias for `--overwrite_backup`) |
+| `--overwrite_backup` | Overwrite an existing `.bak` backup (same as `--force`, matches MCP argument name) |
+| `--flat`          | Disable section grouping (flat output)             |
 
 ```bash
 # Basic repair (no normalization, grouped output with % STATUS comments)
 doi2bib3 repair references.bib
 
-# Repair with normalization and force overwrite existing backup
-doi2bib3 repair references.bib --normalize --force
+# Repair with normalization, force overwrite existing backup, flat output
+doi2bib3 repair references.bib --normalize --force --flat
+
+# Same using the MCP-style argument name
+doi2bib3 repair references.bib --normalize --overwrite_backup --flat
 ```
 ```
 Entries: 99  Repaired: 80  Skipped: 15  Failed: 4
@@ -156,6 +168,20 @@ doi2bib3 normalize "@article{x, title={Hello}, journal={Physical Review B}, year
  year = {2020}
 }
 ```
+
+### MCP common arguments
+
+All MCP tools accept these optional arguments:
+
+| Argument          | Type    | Description                                              |
+|-------------------|---------|----------------------------------------------------------|
+| `timeout`         | integer | Per-request network timeout in seconds (default 30).     |
+| `refresh_cache`   | boolean | Bypass the reference cache and force a fresh network fetch. |
+
+When calling tools through an MCP client that supports `progressToken`, the
+server streams per-entry progress notifications during `audit_bib_file` and
+`repair_bib_file_inplace` — no extra configuration needed on the caller side
+beyond providing the token in the request metadata.
 
 ### `doi2bib3 cache-stats`
 
@@ -295,8 +321,17 @@ for automated CLI tests.
 
 - `doi2bib3/backend.py`: input resolution and network fetch logic
 - `doi2bib3/normalize.py`: BibTeX normalization/transforms
+- `doi2bib3/bibitem.py`: APS/RevTeX `\bibitem` formatting
 - `doi2bib3/io.py`: file output helpers
-- `scripts/doi2bib3`: command-line argument parsing and output handling
+- `doi2bib3/constants.py`: shared constants (user agent)
+- `doi2bib3/mcp_server/`: MCP server implementation
+  - `server.py`: MCP SDK wiring, tool dispatch, progress notification support
+  - `tools.py`: tool handlers (`audit_bib_file`, `resolve_reference`, `normalize_bibtex_entry`)
+  - `repair.py`: in-place repair handler with backup/atomic-write/rollback safety
+  - `adapter.py`: adapter layer between MCP and backend; result types, progress callback
+  - `cache.py`: SQLite-backed reference cache with WAL mode and TTL expiry
+- `scripts/doi2bib3`: command-line argument parsing and subcommand dispatch
+- `scripts/doi2bib3-mcp`: MCP server launcher script
 
 ## License
 

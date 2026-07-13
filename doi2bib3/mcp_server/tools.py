@@ -21,6 +21,8 @@ from .adapter import (
     Issue,
     EntryReport,
     AuditSummary,
+    ProgressCallback,
+    build_progress_payload,
     KIND_RESOLVED,
     KIND_UNRESOLVABLE,
     KIND_UNAVAILABLE,
@@ -182,6 +184,7 @@ def audit_bib_file(
     path: str | None,
     timeout: int = DEFAULT_TIMEOUT,
     refresh_cache: bool = False,
+    progress_callback: ProgressCallback | None = None,
 ) -> ToolResult:
     """Parse a .bib file and cross-reference entries against canonical metadata.
 
@@ -219,7 +222,7 @@ def audit_bib_file(
 
     reports: list[EntryReport] = []
 
-    for entry in entries:
+    for index, entry in enumerate(entries):
         key = entry.get("ID", "")
         etype = entry.get("ENTRYTYPE", "")
         doi = _entry_doi(entry)
@@ -229,9 +232,11 @@ def audit_bib_file(
 
         # If we have a DOI or a title, try to resolve canonical metadata.
         identifier = doi or title
+        outcome: str = "skipped"
         if identifier:
             result = adapter.resolve_identifier(identifier, timeout=timeout, refresh_cache=refresh_cache)
             if result.ok and result.data:
+                outcome = "resolved"
                 canonical = _canonical_entry_fields(result.data)
                 for field in DIFF_FIELDS:
                     actual = entry.get(field)
@@ -255,6 +260,7 @@ def audit_bib_file(
                             )
                         )
             elif result.kind == KIND_UNAVAILABLE:
+                outcome = "failed"
                 report.issues.append(
                     Issue(
                         field="doi" if doi else "title",
@@ -263,6 +269,7 @@ def audit_bib_file(
                     )
                 )
             elif result.kind == KIND_UNRESOLVABLE and doi:
+                outcome = "failed"
                 # Only flag malformed for an explicit DOI that failed to resolve;
                 # a title that fails to resolve is not necessarily malformed.
                 report.issues.append(
@@ -277,6 +284,21 @@ def audit_bib_file(
             pass
 
         reports.append(report)
+
+        if progress_callback is not None:
+            try:
+                progress_callback(
+                    build_progress_payload(
+                        index=index,
+                        total=len(entries),
+                        key=key,
+                        doi=doi,
+                        outcome=outcome,
+                        message=f"Entry {index + 1}/{len(entries)}: {key} — {outcome}",
+                    )
+                )
+            except Exception:
+                pass
 
     # Attach any file-level parse issues to a synthetic report so they are not
     # lost (e.g. when the whole file failed to parse but the tool did not crash).
@@ -296,6 +318,21 @@ def audit_bib_file(
         with_issues=with_issues,
         missing_doi=missing_doi,
     )
+
+    if progress_callback is not None:
+        try:
+            progress_callback(
+                build_progress_payload(
+                    index=len(reports),
+                    total=len(reports),
+                    key="",
+                    doi=None,
+                    outcome="complete",
+                    message="Audit complete",
+                )
+            )
+        except Exception:
+            pass
 
     payload = {
         "entries": [r.to_dict() for r in reports],

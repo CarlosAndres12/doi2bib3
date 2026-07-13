@@ -283,6 +283,31 @@ All five tools accept an optional `"refresh_cache": true` boolean in their
 arguments. When set, the reference cache is bypassed and a fresh network
 fetch is forced. The cache is updated with the new result.
 
+## Progress notifications
+
+`audit_bib_file` and `repair_bib_file_inplace` support MCP progress
+notifications. When the MCP client provides a `progressToken` in the
+`tools/call` request metadata (`_meta.progressToken`), the server emits
+`notifications/progress` after each entry is resolved. Each notification
+includes:
+
+- `progress`: a float from 0 to 1 (`(entry_index + 1) / total_entries`)
+- `total`: the total number of entries in the file
+- A message with the entry key, DOI, and outcome (resolved/skipped/failed)
+
+The final notification has `progress` equal to 1.0 with outcome `"complete"`.
+If no `progressToken` is provided, no progress notifications are emitted and
+the tool result is unchanged. Progress callback failures are silently caught
+and never abort the audit or repair.
+
+### `overwrite_backup` flag
+
+The `repair_bib_file_inplace` tool accepts an optional `overwrite_backup`
+boolean (default `false`). When an existing `${path}.bak` file is present,
+the tool returns a `backup_conflict` error unless `overwrite_backup` is
+explicitly set to `true`. The CLI exposes this as both `--force` and
+`--overwrite_backup` for convenience.
+
 ## Direct Python usage
 
 All MCP tool handlers are importable Python functions that return `ToolResult`

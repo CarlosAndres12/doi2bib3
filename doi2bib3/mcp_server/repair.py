@@ -44,6 +44,8 @@ from .adapter import (
     KIND_UNAVAILABLE,
     KIND_UNRESOLVABLE,
     DEFAULT_TIMEOUT,
+    ProgressCallback,
+    build_progress_payload,
 )
 from .tools import _parse_bib_file, _entry_doi
 
@@ -239,6 +241,7 @@ def repair_bib_file_inplace(
     timeout: int = DEFAULT_TIMEOUT,
     refresh_cache: bool = False,
     group_output: bool = True,
+    progress_callback: ProgressCallback | None = None,
 ) -> ToolResult:
     """Repair a .bib file in place with backup protection.
 
@@ -312,7 +315,8 @@ def repair_bib_file_inplace(
     outcomes: list[RepairEntryOutcome] = []
     output_entries: list[dict] = []
 
-    for entry in entries:
+    total_entries = len(entries)
+    for index, entry in enumerate(entries):
         key = entry.get("ID", "")
         doi = _entry_doi(entry)
         title = (entry.get("title") or "").strip()
@@ -377,6 +381,44 @@ def repair_bib_file_inplace(
                     key=key, doi=doi, outcome="skipped", error=str(exc)
                 )
             )
+
+        # --- per-entry progress notification ---
+        if progress_callback is not None:
+            oc = outcomes[-1]
+            entry_msg = (
+                f"Entry {index+1}/{total_entries}: {oc.key} — {oc.outcome}"
+            )
+            if oc.error:
+                entry_msg += f" ({oc.error})"
+            try:
+                progress_callback(
+                    build_progress_payload(
+                        index=index,
+                        total=total_entries,
+                        key=oc.key,
+                        doi=oc.doi,
+                        outcome=oc.outcome,
+                        message=entry_msg,
+                    )
+                )
+            except Exception:
+                pass
+
+    # --- final completion notification ---
+    if progress_callback is not None:
+        try:
+            progress_callback(
+                build_progress_payload(
+                    index=total_entries,
+                    total=total_entries,
+                    key="",
+                    doi=None,
+                    outcome="complete",
+                    message="Repair complete",
+                )
+            )
+        except Exception:
+            pass
 
     # --- assemble repaired output (task 2.6) ---
     try:

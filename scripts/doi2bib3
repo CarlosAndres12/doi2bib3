@@ -12,7 +12,7 @@ Supports both single-identifier fetch and MCP subcommands:
 
     # MCP subcommands (require [mcp] extra)
     doi2bib3 audit <path>
-    doi2bib3 repair <path> [--normalize] [--force] [--flat]
+    doi2bib3 repair <path> [--normalize] [--force|--overwrite-backup] [--flat]
     doi2bib3 resolve <identifier>
     doi2bib3 normalize <bibtex>
     doi2bib3 cache-stats
@@ -47,13 +47,54 @@ def _mcp_error():
 
 # --- Subcommand handlers ----------------------------------------------------
 
+def _make_cli_progress_callback(stream=None):
+    """Build a progress callback that prints a progress bar to stderr.
+
+    Uses carriage-return updates so the bar rewrites in place.  The bar is
+    written to *stream* (default ``sys.stderr``) so stdout stays clean for
+    the final result.
+    """
+    stream = stream or sys.stderr
+
+    def _callback(payload):
+        index = payload.get("index", 0)
+        total = payload.get("total", 0)
+        key = payload.get("key", "?")
+        outcome = payload.get("outcome", "")
+        if total <= 0:
+            return
+
+        if outcome == "complete":
+            bar_width = 30
+            bar = "\u2588" * bar_width
+            stream.write(
+                f"\rProgress: [{bar}] {total}/{total} (100%) - done          \n"
+            )
+            stream.flush()
+            return
+
+        progress = (index + 1) / total
+        percent = int(progress * 100)
+        bar_width = 30
+        filled = int(bar_width * progress)
+        bar = "\u2588" * filled + " " * (bar_width - filled)
+        display_key = key[:25] if len(key) > 25 else key
+        stream.write(
+            f"\rProgress: [{bar}] {index + 1}/{total} ({percent}%) "
+            f"- {display_key} ({outcome})"
+        )
+        stream.flush()
+
+    return _callback
+
+
 def _cmd_audit(args):
     """doi2bib3 audit <path>"""
     try:
         from doi2bib3.mcp_server.tools import audit_bib_file
     except ImportError:
         return _mcp_error()
-    r = audit_bib_file(args.path)
+    r = audit_bib_file(args.path, progress_callback=_make_cli_progress_callback())
     if not r.ok:
         print("Error:", r.error, file=sys.stderr)
         return 1
@@ -76,7 +117,7 @@ def _cmd_audit(args):
 
 
 def _cmd_repair(args):
-    """doi2bib3 repair <path> [--normalize] [--force] [--flat]"""
+    """doi2bib3 repair <path> [--normalize] [--force|--overwrite-backup] [--flat]"""
     try:
         from doi2bib3.mcp_server.repair import repair_bib_file_inplace
     except ImportError:
@@ -86,6 +127,7 @@ def _cmd_repair(args):
         auto_normalize=args.normalize,
         overwrite_backup=args.force,
         group_output=not args.flat,
+        progress_callback=_make_cli_progress_callback(),
     )
     if not r.ok:
         print("Error:", r.error, file=sys.stderr)
@@ -183,6 +225,9 @@ def build_parser():
                     help="Apply doi2bib3.normalize (casing, publisher replacements)")
     pr.add_argument("--force", action="store_true",
                     help="Overwrite an existing .bak backup")
+    pr.add_argument("--overwrite-backup", "--overwrite_backup",
+                    action="store_true", dest="force",
+                    help="Overwrite an existing .bak backup (MCP argument name)")
     pr.add_argument("--flat", action="store_true",
                     help="Disable section grouping in output (flat format)")
     pr.set_defaults(func=_cmd_repair)
